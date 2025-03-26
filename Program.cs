@@ -1,6 +1,7 @@
 ﻿using System.Drawing;
 using System.Text.RegularExpressions;
 using PdfiumViewer;
+using PdfSharp.Pdf.IO;
 using Tesseract;
 
 namespace PDFtoTEXT
@@ -9,28 +10,49 @@ namespace PDFtoTEXT
     {
         static void Main(string[] args)
         {
-            string pdfFilePath = @"C:\Users\ivan3\Desktop\data\1.pdf";
-            string tessdataPath = @"C:\Users\ivan3\Desktop\data"; // Папка должна содержать rus.traineddata
+            //string pdfFilePath = @"C:\Users\ADMIN\Desktop\data\1.pdf";
+            //string tessdataPath = @"C:\Users\ADMIN\Desktop\data"; // Папка должна содержать rus.traineddata
+            
+            
+            
+            string projectDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            string pdfFilePath = Path.Combine(projectDirectory, "PDFDocuments");
+            string tessdataPath = projectDirectory;
+            string[] pdfFiles = Directory.GetFiles(pdfFilePath, "*.pdf", SearchOption.TopDirectoryOnly);
 
-            ExtractNamesFromPdf(pdfFilePath, tessdataPath);
-            Console.WriteLine("Обработка завершена.");
+            foreach (string pdfFile in pdfFiles)
+            {
+                // Вызываем метод для каждого PDF-файла
+                ExtractNamesFromPdf(pdfFile, tessdataPath);
+            }
         }
 
         /// <summary>
-        /// Обрабатывает PDF, извлекает OCR-текст каждой страницы, ищет имя и выводит номер страницы и имя.
+        /// Обрабатывает PDF: для каждой страницы выполняется OCR, извлекается имя,
+        /// выводится в консоль, а затем соответствующая страница сохраняется в отдельный PDF-файл.
         /// </summary>
         public static void ExtractNamesFromPdf(string pdfPath, string tessdataPath)
         {
-            using (var document = PdfDocument.Load(pdfPath))
+            // Создаём папку для сохранения отдельных страниц
+            string outputFolder = Path.Combine(Path.GetDirectoryName(pdfPath), "Pages");
+            Directory.CreateDirectory(outputFolder);
+
+            // Загружаем PDF для рендеринга (OCR) с помощью PdfiumViewer
+            using (var pdfViewerDocument = PdfDocument.Load(pdfPath))
+            // Открываем исходный PDF для извлечения страниц с помощью PdfSharp
+            using (var inputDoc = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import))
             {
-                for (int i = 0; i < document.PageCount; i++)
+                for (int i = 0; i < pdfViewerDocument.PageCount; i++)
                 {
-                    using (var bitmap = RenderPageToBitmap(document, i))
+                    using (var bitmap = RenderPageToBitmap(pdfViewerDocument, i))
                     {
                         string pageText = PerformOcr(bitmap, tessdataPath);
                         string name = ExtractName(pageText);
-                        Console.WriteLine($"Страница {i} : {name}");
+                        Console.WriteLine($"Страница {i + 1} : {name}");
                         Console.Out.Flush();
+
+                        // Извлекаем и сохраняем страницу в отдельный PDF-файл
+                        SavePageAsPdf(inputDoc, i, name, outputFolder);
                     }
                 }
             }
@@ -39,7 +61,7 @@ namespace PDFtoTEXT
         /// <summary>
         /// Рендерит указанную страницу PDF в Bitmap с разрешением 300 DPI.
         /// </summary>
-        public static Bitmap RenderPageToBitmap(PdfDocument document, int pageIndex)
+        public static Bitmap RenderPageToBitmap(PdfiumViewer.PdfDocument document, int pageIndex)
         {
             const int dpi = 300;
             var size = document.PageSizes[pageIndex];
@@ -78,11 +100,10 @@ namespace PDFtoTEXT
 
         /// <summary>
         /// Извлекает имя и фамилию из OCR-текста.
-        /// Предполагается, что после фразы "Настоящий сертификат удостоверяет, что" может идти до трех пустых строк, а затем 2–3 слова с заглавной буквы.
+        /// Предполагается, что после фразы "Настоящий сертификат удостоверяет, что" идёт текст с именем.
         /// </summary>
         // Порог допустимых различий (можно настроить)
-        private const int AllowedDifferences = 2;
-
+        private const int AllowedDifferences = 3;
         // Ожидаемый маркер
         private const string ExpectedMarker = "Настоящий сертификат удостоверяет, что";
 
@@ -113,8 +134,8 @@ namespace PDFtoTEXT
             string cleanedText = Regex.Replace(textAfterMarker, @"[^\p{L}\s]", " ");
             cleanedText = Regex.Replace(cleanedText, @"\s+", " ").Trim();
 
-            // Ищем имя – минимум два слова, каждое начинается с заглавной буквы, затем строчные
-            string pattern = @"\b([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)+)\b";
+            // Шаблон для имени: минимум два слова, каждое начинается с заглавной буквы и содержит минимум 3 буквы
+            string pattern = @"\b([А-ЯЁ][а-яё]{2,}(?:\s+[А-ЯЁ][а-яё]{2,})+)\b";
             Match match = Regex.Match(cleanedText, pattern);
             if (match.Success)
             {
@@ -129,8 +150,7 @@ namespace PDFtoTEXT
             return Regex.Replace(text, @"[^\p{L}]", "").ToLower();
         }
 
-        // Преобразуем позицию в нормализованном тексте в позицию в исходном тексте,
-        // считая только буквы.
+        // Преобразуем позицию в нормализованном тексте в позицию в исходном тексте, считая только буквы.
         private static int MapNormalizedIndexToOriginal(string originalText, int normIndex)
         {
             int letterCount = 0;
@@ -189,6 +209,36 @@ namespace PDFtoTEXT
                 }
             }
             return d[n, m];
+        }
+
+        /// <summary>
+        /// Сохраняет исходную страницу PDF в отдельный PDF-файл.
+        /// Используется PdfSharp для извлечения страницы в оригинальном формате.
+        /// </summary>
+        private static void SavePageAsPdf(PdfSharp.Pdf.PdfDocument inputDoc, int pageIndex, string name, string outputFolder)
+        {
+            // Создаём новый PDF-документ и добавляем в него выбранную страницу
+            PdfSharp.Pdf.PdfDocument outputDoc = new PdfSharp.Pdf.PdfDocument();
+            outputDoc.AddPage(inputDoc.Pages[pageIndex]);
+
+            // Очищаем имя от недопустимых символов для имени файла
+            string sanitizedName = SanitizeFileName(name);
+            // Формируем имя файла: номер страницы + "_" + имя + ".pdf"
+            string fileName = $"{sanitizedName}.pdf";
+            string filePath = Path.Combine(outputFolder, fileName);
+            outputDoc.Save(filePath);
+        }
+
+        /// <summary>
+        /// Удаляет из строки символы, недопустимые для имени файла.
+        /// </summary>
+        private static string SanitizeFileName(string fileName)
+        {
+            foreach (char c in Path.GetInvalidFileNameChars())
+            {
+                fileName = fileName.Replace(c, '_');
+            }
+            return fileName;
         }
     }
 }
