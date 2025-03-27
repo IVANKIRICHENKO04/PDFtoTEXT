@@ -10,21 +10,43 @@ namespace PDFtoTEXT
     {
         static void Main(string[] args)
         {
-            //string pdfFilePath = @"C:\Users\ADMIN\Desktop\data\1.pdf";
-            //string tessdataPath = @"C:\Users\ADMIN\Desktop\data"; // Папка должна содержать rus.traineddata
-            
-            
-            
-            string projectDirectory = AppDomain.CurrentDomain.BaseDirectory;
-            string pdfFilePath = Path.Combine(projectDirectory, "PDFDocuments");
-            string tessdataPath = projectDirectory;
-            string[] pdfFiles = Directory.GetFiles(pdfFilePath, "*.pdf", SearchOption.TopDirectoryOnly);
-
-            foreach (string pdfFile in pdfFiles)
+            Console.WriteLine("Программа запущена.");
+            try
             {
-                // Вызываем метод для каждого PDF-файла
-                ExtractNamesFromPdf(pdfFile, tessdataPath);
+                string projectDirectory = AppDomain.CurrentDomain.BaseDirectory;
+                Console.WriteLine($"Каталог проекта: {projectDirectory}");
+
+                // Папка с PDF-документами
+                string pdfFolderPath = Path.Combine(projectDirectory, "PDFDocuments");
+                Console.WriteLine($"Папка с PDF-документами: {pdfFolderPath}");
+
+                // Папка с tessdata (ожидается, что файлы, например rus.traineddata, лежат в каталоге проекта)
+                string tessdataPath = projectDirectory;
+
+                string[] pdfFiles = Directory.GetFiles(pdfFolderPath, "*.pdf", SearchOption.TopDirectoryOnly);
+                Console.WriteLine($"Найдено {pdfFiles.Length} PDF файлов.");
+
+                foreach (string pdfFile in pdfFiles)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"Начинаем обработку файла: {pdfFile}");
+                    try
+                    {
+                        ExtractNamesFromPdf(pdfFile, tessdataPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Ошибка при обработке файла {pdfFile}: {ex.Message}");
+                    }
+                }
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Критическая ошибка: {ex.Message}");
+            }
+
+            Console.WriteLine("Обработка завершена. Нажмите любую клавишу для выхода...");
+            Console.ReadKey();
         }
 
         /// <summary>
@@ -33,28 +55,44 @@ namespace PDFtoTEXT
         /// </summary>
         public static void ExtractNamesFromPdf(string pdfPath, string tessdataPath)
         {
-            // Создаём папку для сохранения отдельных страниц
+
             string outputFolder = Path.Combine(Path.GetDirectoryName(pdfPath), "Pages");
             Directory.CreateDirectory(outputFolder);
-
-            // Загружаем PDF для рендеринга (OCR) с помощью PdfiumViewer
-            using (var pdfViewerDocument = PdfDocument.Load(pdfPath))
-            // Открываем исходный PDF для извлечения страниц с помощью PdfSharp
-            using (var inputDoc = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import))
+            try
             {
-                for (int i = 0; i < pdfViewerDocument.PageCount; i++)
+                // Загружаем PDF для рендеринга (OCR) с помощью PdfiumViewer
+                using (var pdfViewerDocument = PdfDocument.Load(pdfPath))
+                // Открываем исходный PDF для извлечения страниц с помощью PdfSharp
+                using (var inputDoc = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import))
                 {
-                    using (var bitmap = RenderPageToBitmap(pdfViewerDocument, i))
+                    Console.WriteLine($"Количество страниц: {pdfViewerDocument.PageCount}");
+                    for (int i = 0; i < pdfViewerDocument.PageCount; i++)
                     {
-                        string pageText = PerformOcr(bitmap, tessdataPath);
-                        string name = ExtractName(pageText);
-                        Console.WriteLine($"Страница {i + 1} : {name}");
-                        Console.Out.Flush();
+                        Console.WriteLine($"Обработка страницы {i + 1}");
+                        try
+                        {
+                            using (var bitmap = RenderPageToBitmap(pdfViewerDocument, i))
+                            {
+                                string pageText = PerformOcr(bitmap, tessdataPath);
+                                // Выводим первые 50 символов OCR-текста для отладки
+                                string name = ExtractName(pageText);
+                                Console.Out.Flush();
 
-                        // Извлекаем и сохраняем страницу в отдельный PDF-файл
-                        SavePageAsPdf(inputDoc, i, name, outputFolder);
+                                // Извлекаем и сохраняем страницу в отдельный PDF-файл
+                                SavePageAsPdf(inputDoc, i, name, outputFolder);
+                                Console.WriteLine($"Страница {i + 1}: {name}");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Ошибка на странице {i + 1}: {ex.Message}");
+                        }
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при открытии или обработке PDF файла: {ex.Message}");
             }
         }
 
@@ -63,12 +101,20 @@ namespace PDFtoTEXT
         /// </summary>
         public static Bitmap RenderPageToBitmap(PdfiumViewer.PdfDocument document, int pageIndex)
         {
-            const int dpi = 300;
-            var size = document.PageSizes[pageIndex];
-            int width = (int)(size.Width * dpi / 72);
-            int height = (int)(size.Height * dpi / 72);
-            Bitmap bitmap = (Bitmap)document.Render(pageIndex, width, height, dpi, dpi, PdfRenderFlags.Annotations);
-            return bitmap;
+            try
+            {
+                const int dpi = 300;
+                var size = document.PageSizes[pageIndex];
+                int width = (int)(size.Width * dpi / 72);
+                int height = (int)(size.Height * dpi / 72);
+                Bitmap bitmap = (Bitmap)document.Render(pageIndex, width, height, dpi, dpi, PdfRenderFlags.Annotations);
+                return bitmap;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при рендеринге страницы {pageIndex + 1}: {ex.Message}");
+                throw;
+            }
         }
 
         /// <summary>
@@ -77,24 +123,32 @@ namespace PDFtoTEXT
         /// </summary>
         public static string PerformOcr(Bitmap image, string tessdataPath)
         {
-            using (var engine = new TesseractEngine(tessdataPath, "rus", EngineMode.Default))
+            try
             {
-                // Поворачиваем изображение, если оно перевёрнуто на 90 градусов
-                image.RotateFlip(RotateFlipType.Rotate90FlipNone);
-
-                // Сохраняем изображение во временный файл
-                string tempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString() + ".png");
-                image.Save(tempFile, System.Drawing.Imaging.ImageFormat.Png);
-
-                using (var pix = Pix.LoadFromFile(tempFile))
+                using (var engine = new TesseractEngine(tessdataPath, "rus", EngineMode.Default))
                 {
-                    using (var page = engine.Process(pix, PageSegMode.SingleBlock))
+                    // Поворачиваем изображение, если оно перевёрнуто на 90 градусов
+                    image.RotateFlip(RotateFlipType.Rotate90FlipNone);
+
+                    // Сохраняем изображение во временный файл
+                    string tempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString() + ".png");
+                    image.Save(tempFile, System.Drawing.Imaging.ImageFormat.Png);
+
+                    using (var pix = Pix.LoadFromFile(tempFile))
                     {
-                        string text = page.GetText();
-                        File.Delete(tempFile); // Удаляем временный файл
-                        return text;
+                        using (var page = engine.Process(pix, PageSegMode.SingleBlock))
+                        {
+                            string text = page.GetText();
+                            File.Delete(tempFile); // Удаляем временный файл
+                            return text;
+                        }
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при выполнении OCR: {ex.Message}");
+                throw;
             }
         }
 
@@ -109,39 +163,48 @@ namespace PDFtoTEXT
 
         public static string ExtractName(string ocrText)
         {
-            if (string.IsNullOrWhiteSpace(ocrText))
-                return "Имя не найдено";
 
-            // Нормализуем ожидаемый маркер: удаляем всё, кроме букв, и приводим к нижнему регистру
-            string normalizedMarker = Normalize(ExpectedMarker);
-
-            // Нормализуем весь OCR-текст аналогичным способом
-            string normalizedOCR = Normalize(ocrText);
-
-            // Пытаемся найти в нормализованном тексте подстроку, похожую на маркер
-            int markerPos = FindMarkerPosition(normalizedOCR, normalizedMarker, AllowedDifferences);
-            if (markerPos == -1)
-                return "Имя не найдено";
-
-            // Определяем позицию в исходном тексте по количеству букв до markerPos
-            int originalMarkerIndex = MapNormalizedIndexToOriginal(ocrText, markerPos);
-
-            // Извлекаем текст после найденного маркера и приводим к одной строке
-            string textAfterMarker = ocrText.Substring(originalMarkerIndex);
-            textAfterMarker = textAfterMarker.Replace("\r", " ").Replace("\n", " ");
-
-            // Оставляем в тексте только буквы и пробелы
-            string cleanedText = Regex.Replace(textAfterMarker, @"[^\p{L}\s]", " ");
-            cleanedText = Regex.Replace(cleanedText, @"\s+", " ").Trim();
-
-            // Шаблон для имени: минимум два слова, каждое начинается с заглавной буквы и содержит минимум 3 буквы
-            string pattern = @"\b([А-ЯЁ][а-яё]{2,}(?:\s+[А-ЯЁ][а-яё]{2,})+)\b";
-            Match match = Regex.Match(cleanedText, pattern);
-            if (match.Success)
+            try
             {
-                return match.Groups[1].Value;
+                if (string.IsNullOrWhiteSpace(ocrText))
+                    return "Имя не найдено";
+
+                // Нормализуем ожидаемый маркер: удаляем всё, кроме букв, и приводим к нижнему регистру
+                string normalizedMarker = Normalize(ExpectedMarker);
+
+                // Нормализуем весь OCR-текст аналогичным способом
+                string normalizedOCR = Normalize(ocrText);
+
+                // Пытаемся найти в нормализованном тексте подстроку, похожую на маркер
+                int markerPos = FindMarkerPosition(normalizedOCR, normalizedMarker, AllowedDifferences);
+                if (markerPos == -1)
+                    return "Имя не найдено";
+
+                // Определяем позицию в исходном тексте по количеству букв до markerPos
+                int originalMarkerIndex = MapNormalizedIndexToOriginal(ocrText, markerPos);
+
+                // Извлекаем текст после найденного маркера и приводим к одной строке
+                string textAfterMarker = ocrText.Substring(originalMarkerIndex);
+                textAfterMarker = textAfterMarker.Replace("\r", " ").Replace("\n", " ");
+
+                // Оставляем в тексте только буквы и пробелы
+                string cleanedText = Regex.Replace(textAfterMarker, @"[^\p{L}\s]", " ");
+                cleanedText = Regex.Replace(cleanedText, @"\s+", " ").Trim();
+
+                // Шаблон для имени: минимум два слова, каждое начинается с заглавной буквы и содержит минимум 3 буквы
+                string pattern = @"\b([А-ЯЁ][а-яё]{2,}(?:\s+[А-ЯЁ][а-яё]{2,})+)\b";
+                var match = Regex.Match(cleanedText, pattern);
+                if (match.Success)
+                {
+                    return match.Groups[1].Value;
+                }
+                return "Имя не найдено";
             }
-            return "Имя не найдено";
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при извлечении имени: {ex.Message}");
+                return "Имя не найдено";
+            }
         }
 
         // Нормализация: удаляем всё, кроме букв, и приводим к нижнему регистру
