@@ -1,382 +1,236 @@
-﻿using System.Drawing;
-using System.Text.RegularExpressions;
-using PdfiumViewer;
+﻿using PDFiumCore;
+using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
+using SkiaSharp;
+using System.Text.RegularExpressions;
 using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Tesseract;
 
-namespace PDFtoTEXT
+class Program
 {
-    class Program
+    private static readonly string BotToken = GetBotToken();
+
+    private static string GetBotToken()
     {
-        static async Task Main(string[] args)
+            return "7986993779:AAHfJmEMVfsfDaRx22n0YH2ew5nLL9JwFjE";
+    }
+
+    static async Task Main(string[] args)
+    {
+        fpdfview.FPDF_InitLibrary();
+        await RunTelegramBotAsync();
+        fpdfview.FPDF_DestroyLibrary();
+    }
+
+    public static async Task RunTelegramBotAsync()
+    {
+        var botClient = new TelegramBotClient(BotToken);
+        using var cts = new CancellationTokenSource();
+
+        var receiverOptions = new ReceiverOptions
         {
-            // Запуск в режиме Telegram-бота:
-            await RunTelegramBotAsync();
+            AllowedUpdates = new[] { UpdateType.Message }
+        };
 
-            // Если требуется режим обработки папки, закомментируйте строку выше и раскомментируйте строку ниже:
-            // RunFolderProcessing();
-        }
+        botClient.StartReceiving(HandleUpdateAsync, HandleErrorAsync, receiverOptions, cts.Token);
 
-        public static async Task RunTelegramBotAsync()
+        Console.WriteLine("🟢 Бот успешно запущен и ожидает сообщений...");
+
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
+        Console.CancelKeyPress += (_, eventArgs) =>
         {
-            // Токен, полученный от BotFather (храните его безопасно!)
-            var botClient = new TelegramBotClient("варлдоваопрвжыарповарпоыврапорывапрвыапоываполдрываролдп");
-            var me = await botClient.GetMeAsync();
-            Console.WriteLine($"Бот запущен: {me.FirstName} (ID: {me.Id})");
-
-            using CancellationTokenSource cts = new CancellationTokenSource();
-
-            var receiverOptions = new ReceiverOptions
-            {
-                AllowedUpdates = Array.Empty<UpdateType>()
-            };
-
-            botClient.StartReceiving(
-                updateHandler: HandleUpdateAsync,
-                errorHandler: HandleErrorAsync,
-                receiverOptions: receiverOptions,
-                cancellationToken: cts.Token
-            );
-
-            Console.WriteLine("Бот запущен и ждёт сообщений. Нажмите любую клавишу для завершения...");
-            Console.ReadKey();
+            eventArgs.Cancel = true;
             cts.Cancel();
-        }
+        };
 
-        static async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken cancellationToken)
+        try
         {
-            if (update.Type == UpdateType.Message && update.Message != null)
-            {
-                Message message = update.Message;
-                if (message.Document != null && message.Document.MimeType == "application/pdf")
-                {
-                    try
-                    {
-                        // Получаем информацию о файле
-                        var file = await bot.GetFileAsync(message.Document.FileId, cancellationToken);
-                        string telegramFilePath = file.FilePath;
-                        string localFilePath = Path.Combine(Path.GetTempPath(), message.Document.FileName);
-
-                        // Формируем URL для скачивания файла:
-                        string botToken = "варлдоваопрвжыарповарпоыврапорывапрвыапоываполдрываролдп";
-                        string fileUrl = $"https://api.telegram.org/file/bot{botToken}/{telegramFilePath}";
-
-                        using (var httpClient = new HttpClient())
-                        using (var response = await httpClient.GetAsync(fileUrl, cancellationToken))
-                        {
-                            response.EnsureSuccessStatusCode();
-                            using (var stream = new FileStream(localFilePath, FileMode.Create))
-                            {
-                                await response.Content.CopyToAsync(stream, cancellationToken);
-                            }
-                        }
-                        Console.WriteLine($"Файл сохранён: {localFilePath}");
-
-                        string tessdataPath = AppDomain.CurrentDomain.BaseDirectory;
-                        // Отправляем страницы по мере их обработки
-                        await ExtractNamesFromPdfAndSendAsync(localFilePath, tessdataPath, bot, message.Chat.Id, cancellationToken);
-
-                        await bot.SendTextMessageAsync(message.Chat.Id, "PDF документ успешно обработан!", cancellationToken: cancellationToken);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Ошибка обработки PDF: {ex.Message}");
-                        await bot.SendTextMessageAsync(message.Chat.Id, $"Ошибка обработки PDF: {ex.Message}", cancellationToken: cancellationToken);
-                    }
-                }
-                else
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "Пожалуйста, отправьте PDF документ.", cancellationToken: cancellationToken);
-                }
-            }
+            await Task.Delay(Timeout.Infinite, cts.Token);
         }
+        catch (TaskCanceledException) { }
 
-        static Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken cancellationToken)
-        {
-            Console.WriteLine($"Ошибка: {exception.Message}");
-            return Task.CompletedTask;
-        }
+        Console.WriteLine("🔴 Бот остановлен.");
+    }
 
-        public static void RunFolderProcessing()
+    static async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken token)
+    {
+        var chatId = update.Message?.Chat.Id;
+        var userName = update.Message?.From?.Username ?? "неизвестный пользователь";
+
+        if (update.Message?.Document?.MimeType == "application/pdf")
         {
-            Console.WriteLine("Программа запущена в режиме обработки папки.");
+            Console.WriteLine($"📥 PDF получен от {userName}. Начинается обработка.");
+
             try
             {
-                string projectDirectory = AppDomain.CurrentDomain.BaseDirectory;
-                string pdfFolderPath = Path.Combine(projectDirectory, "PDFDocuments");
-                string tessdataPath = projectDirectory;
-                string[] pdfFiles = Directory.GetFiles(pdfFolderPath, "*.pdf", SearchOption.TopDirectoryOnly);
+                var file = await bot.GetFileAsync(update.Message.Document.FileId, token);
+                var localPath = Path.Combine(Path.GetTempPath(), update.Message.Document.FileName!);
 
-                Console.WriteLine($"Найдено {pdfFiles.Length} PDF файлов.");
-                foreach (string pdfFile in pdfFiles)
+                var fileUrl = $"https://api.telegram.org/file/bot{BotToken}/{file.FilePath}";
+                using (var httpClient = new HttpClient())
+                await using (var fs = new FileStream(localPath, FileMode.Create))
                 {
-                    Console.WriteLine($"\nНачинаем обработку файла: {pdfFile}");
-                    try
-                    {
-                        ExtractNamesFromPdf(pdfFile, tessdataPath);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Ошибка при обработке файла {pdfFile}: {ex.Message}");
-                    }
+                    var fileStream = await httpClient.GetStreamAsync(fileUrl, token);
+                    await fileStream.CopyToAsync(fs, token);
                 }
+
+                Console.WriteLine($"💾 PDF скачан: {localPath}");
+
+                await ExtractAndSendPagesAsync(localPath, bot, chatId!.Value, token);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Критическая ошибка: {ex.Message}");
+                Console.WriteLine($"⚠️ Ошибка обработки PDF: {ex.Message}");
+                await bot.SendTextMessageAsync(chatId!, $"⚠️ Ошибка обработки PDF: {ex.Message}", cancellationToken: token);
             }
-            Console.WriteLine("Обработка завершена. Нажмите любую клавишу для выхода...");
-            Console.ReadKey();
         }
-
-        // Новый метод: обрабатывает PDF и отправляет каждую страницу сразу после обработки
-        public static async Task ExtractNamesFromPdfAndSendAsync(string pdfPath, string tessdataPath, ITelegramBotClient bot, long chatId, CancellationToken cancellationToken)
+        else
         {
-            string outputFolder = Path.Combine(Path.GetDirectoryName(pdfPath), "Pages");
-            Directory.CreateDirectory(outputFolder);
-            try
-            {
-                using (var pdfViewerDocument = PdfDocument.Load(pdfPath))
-                using (var inputDoc = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import))
-                {
-                    Console.WriteLine($"Количество страниц: {pdfViewerDocument.PageCount}");
-                    for (int i = 0; i < pdfViewerDocument.PageCount; i++)
-                    {
-                        Console.WriteLine($"Обработка страницы {i + 1}");
-                        try
-                        {
-                            using (var bitmap = RenderPageToBitmap(pdfViewerDocument, i))
-                            {
-                                string pageText = PerformOcr(bitmap, tessdataPath);
-                                string name = ExtractName(pageText);
-                                Console.Out.Flush();
-
-                                string savedFilePath = SavePageAsPdf(inputDoc, i, name, outputFolder);
-                                Console.WriteLine($"Страница {i + 1}: {name}");
-
-                                using var fileStream = File.OpenRead(savedFilePath);
-                                await bot.SendDocumentAsync(
-                                    chatId: chatId,
-                                    document: new InputFileStream(fileStream, Path.GetFileName(savedFilePath)),
-                                    cancellationToken: cancellationToken
-                                );
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Ошибка на странице {i + 1}: {ex.Message}");
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Ошибка при открытии или обработке PDF файла: {ex.Message}");
-            }
+            Console.WriteLine($"⚠️ Получено не PDF от {userName}.");
+            await bot.SendTextMessageAsync(chatId!, "⚠️ Пожалуйста, отправьте PDF файл.", cancellationToken: token);
         }
+    }
 
-        // Оригинальный метод для обработки PDF (для режима папки)
-        public static List<string> ExtractNamesFromPdf(string pdfPath, string tessdataPath)
-        {
-            List<string> processedFiles = new List<string>();
-            string outputFolder = Path.Combine(Path.GetDirectoryName(pdfPath), "Pages");
-            Directory.CreateDirectory(outputFolder);
-            try
-            {
-                using (var pdfViewerDocument = PdfDocument.Load(pdfPath))
-                using (var inputDoc = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import))
-                {
-                    Console.WriteLine($"Количество страниц: {pdfViewerDocument.PageCount}");
-                    for (int i = 0; i < pdfViewerDocument.PageCount; i++)
-                    {
-                        Console.WriteLine($"Обработка страницы {i + 1}");
-                        try
-                        {
-                            using (var bitmap = RenderPageToBitmap(pdfViewerDocument, i))
-                            {
-                                string pageText = PerformOcr(bitmap, tessdataPath);
-                                string name = ExtractName(pageText);
-                                Console.Out.Flush();
-                                string savedFilePath = SavePageAsPdf(inputDoc, i, name, outputFolder);
-                                processedFiles.Add(savedFilePath);
-                                Console.WriteLine($"Страница {i + 1}: {name}");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Ошибка на странице {i + 1}: {ex.Message}");
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Ошибка при открытии или обработке PDF файла: {ex.Message}");
-            }
-            return processedFiles;
-        }
+    static Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken token)
+    {
+        Console.WriteLine($"❌ Ошибка: {exception.Message}");
+        return Task.CompletedTask;
+    }
 
-        public static Bitmap RenderPageToBitmap(PdfDocument document, int pageIndex)
+    static async Task ExtractAndSendPagesAsync(string pdfPath, ITelegramBotClient bot, long chatId, CancellationToken token)
+    {
+        Console.WriteLine($"🛠️ Начало обработки файла: {pdfPath}");
+        var tessdataPath = AppDomain.CurrentDomain.BaseDirectory;
+        using var inputDoc = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import);
+        var pdfDoc = fpdfview.FPDF_LoadDocument(pdfPath, null);
+
+        int pageCount = fpdfview.FPDF_GetPageCount(pdfDoc);
+        Console.WriteLine($"📄 Обнаружено страниц: {pageCount}");
+
+        for (int i = 0; i < pageCount; i++)
         {
             try
             {
-                const int dpi = 300;
-                var size = document.PageSizes[pageIndex];
-                int width = (int)(size.Width * dpi / 72);
-                int height = (int)(size.Height * dpi / 72);
-                Bitmap bitmap = (Bitmap)document.Render(pageIndex, width, height, dpi, dpi, PdfRenderFlags.Annotations);
-                return bitmap;
+                Console.WriteLine($"🔍 Обработка страницы {i + 1}/{pageCount}...");
+                using var bitmap = RenderPage(pdfDoc, i);
+                var text = PerformOcr(bitmap, tessdataPath);
+                var name = ExtractName(text);
+                Console.WriteLine($"📝 Извлечённое имя: {name}");
+
+                var pagePath = SavePageAsPdf(inputDoc, i, name);
+                Console.WriteLine($"📤 Отправка страницы: {pagePath}");
+
+                await using var fs = File.OpenRead(pagePath);
+                await bot.SendDocumentAsync(chatId, new InputFileStream(fs, Path.GetFileName(pagePath)), cancellationToken: token);
+
+                Console.WriteLine($"✅ Страница {i + 1} отправлена.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ошибка при рендеринге страницы {pageIndex + 1}: {ex.Message}");
-                throw;
+                Console.WriteLine($"⚠️ Ошибка на странице {i + 1}: {ex.Message}");
+                await bot.SendTextMessageAsync(chatId, $"⚠️ Ошибка на странице {i + 1}: {ex.Message}", cancellationToken: token);
             }
         }
 
-        public static string PerformOcr(Bitmap image, string tessdataPath)
+        fpdfview.FPDF_CloseDocument(pdfDoc);
+        await bot.SendTextMessageAsync(chatId, "✅ PDF документ успешно обработан!", cancellationToken: token);
+
+        Console.WriteLine("✅ Обработка файла завершена.");
+    }
+
+
+    static SKBitmap RenderPage(FpdfDocumentT pdfDoc, int pageIndex)
+    {
+        Console.WriteLine($"🔍 Начало рендеринга страницы {pageIndex + 1}...");
+        var page = fpdfview.FPDF_LoadPage(pdfDoc, pageIndex);
+        int width = (int)(fpdfview.FPDF_GetPageWidth(page) * 3);
+        int height = (int)(fpdfview.FPDF_GetPageHeight(page) * 3);
+
+        Console.WriteLine($"🖼️ Размер страницы (до поворота): {width}x{height}");
+
+        var bitmapHandle = fpdfview.FPDFBitmapCreate(width, height, 0);
+        fpdfview.FPDFBitmapFillRect(bitmapHandle, 0, 0, width, height, 0xFFFFFFFF);
+        fpdfview.FPDF_RenderPageBitmap(bitmapHandle, page, 0, 0, width, height, 0, 0);
+
+        int stride = fpdfview.FPDFBitmapGetStride(bitmapHandle);
+        IntPtr bufferPtr = fpdfview.FPDFBitmapGetBuffer(bitmapHandle);
+        int bufferSize = stride * height;
+
+        SKBitmap skBitmap = new SKBitmap(width, height, SKColorType.Bgra8888, SKAlphaType.Premul);
+
+        unsafe
         {
-            try
-            {
-                using (var engine = new TesseractEngine(tessdataPath, "rus", EngineMode.Default))
-                {
-                    image.RotateFlip(RotateFlipType.Rotate90FlipNone);
-                    string tempFile = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString() + ".png");
-                    image.Save(tempFile, System.Drawing.Imaging.ImageFormat.Png);
-                    using (var pix = Pix.LoadFromFile(tempFile))
-                    {
-                        using (var page = engine.Process(pix, PageSegMode.SingleBlock))
-                        {
-                            string text = page.GetText();
-                            File.Delete(tempFile);
-                            return text;
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Ошибка при выполнении OCR: {ex.Message}");
-                throw;
-            }
+            Buffer.MemoryCopy((void*)bufferPtr, (void*)skBitmap.GetPixels(), bufferSize, bufferSize);
         }
 
-        private const int AllowedDifferences = 3;
-        private const string ExpectedMarker = "Настоящий сертификат удостоверяет, что";
+        fpdfview.FPDFBitmapDestroy(bitmapHandle);
+        fpdfview.FPDF_ClosePage(page);
 
-        public static string ExtractName(string ocrText)
+        Console.WriteLine($"🔄 Поворот страницы на 90° по часовой стрелке...");
+
+        // Поворачиваем изображение на 90 градусов по часовой стрелке
+        SKBitmap rotatedBitmap = new SKBitmap(height, width);
+        using (var canvas = new SKCanvas(rotatedBitmap))
         {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(ocrText))
-                    return "Имя не найдено";
-
-                string normalizedMarker = Normalize(ExpectedMarker);
-                string normalizedOCR = Normalize(ocrText);
-                int markerPos = FindMarkerPosition(normalizedOCR, normalizedMarker, AllowedDifferences);
-                if (markerPos == -1)
-                    return "Имя не найдено";
-
-                int originalMarkerIndex = MapNormalizedIndexToOriginal(ocrText, markerPos);
-                string textAfterMarker = ocrText.Substring(originalMarkerIndex).Replace("\r", " ").Replace("\n", " ");
-                string cleanedText = Regex.Replace(textAfterMarker, @"[^\p{L}\s]", " ");
-                cleanedText = Regex.Replace(cleanedText, @"\s+", " ").Trim();
-                string pattern = @"\b([А-ЯЁ][а-яё]{2,}(?:\s+[А-ЯЁ][а-яё]{2,})+)\b";
-                var match = Regex.Match(cleanedText, pattern);
-                if (match.Success)
-                {
-                    return match.Groups[1].Value;
-                }
-                return "Имя не найдено";
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Ошибка при извлечении имени: {ex.Message}");
-                return "Имя не найдено";
-            }
+            canvas.Translate(rotatedBitmap.Width, 0);
+            canvas.RotateDegrees(90);
+            canvas.DrawBitmap(skBitmap, 0, 0);
         }
 
-        private static string Normalize(string text)
+        skBitmap.Dispose();
+
+        Console.WriteLine($"✅ Страница {pageIndex + 1} успешно отрендерена и повернута.");
+
+        return rotatedBitmap;
+    }
+
+    static string PerformOcr(SKBitmap bitmap, string tessdataPath)
+    {
+        Console.WriteLine($"🖥️ Выполняется OCR страницы...");
+        try
         {
-            return Regex.Replace(text, @"[^\p{L}]", "").ToLower();
-        }
+            using var data = bitmap.Encode(SKEncodedImageFormat.Png, 100);
+            using var img = Pix.LoadFromMemory(data.ToArray());
 
-        private static int MapNormalizedIndexToOriginal(string originalText, int normIndex)
-        {
-            int letterCount = 0;
-            for (int i = 0; i < originalText.Length; i++)
-            {
-                if (char.IsLetter(originalText[i]))
-                {
-                    if (letterCount == normIndex)
-                        return i;
-                    letterCount++;
-                }
-            }
-            return 0;
-        }
+            using var engine = new TesseractEngine(tessdataPath, "rus", EngineMode.Default);
+            using var page = engine.Process(img);
 
-        private static int FindMarkerPosition(string normalizedOCR, string normalizedMarker, int allowedDifferences)
-        {
-            int markerLength = normalizedMarker.Length;
-            for (int i = 0; i <= normalizedOCR.Length - markerLength; i++)
-            {
-                string window = normalizedOCR.Substring(i, markerLength);
-                int distance = LevenshteinDistance(window, normalizedMarker);
-                if (distance <= allowedDifferences)
-                {
-                    return i;
-                }
-            }
-            return -1;
-        }
+            string text = page.GetText();
 
-        private static int LevenshteinDistance(string s, string t)
-        {
-            int n = s.Length;
-            int m = t.Length;
-            int[,] d = new int[n + 1, m + 1];
-            for (int i = 0; i <= n; i++)
-                d[i, 0] = i;
-            for (int j = 0; j <= m; j++)
-                d[0, j] = j;
-            for (int i = 1; i <= n; i++)
-            {
-                for (int j = 1; j <= m; j++)
-                {
-                    int cost = (s[i - 1] == t[j - 1]) ? 0 : 1;
-                    d[i, j] = Math.Min(
-                        Math.Min(d[i - 1, j] + 1,
-                                 d[i, j - 1] + 1),
-                                 d[i - 1, j - 1] + cost
-                    );
-                }
-            }
-            return d[n, m];
+            Console.WriteLine($"✅ OCR выполнен успешно, длина извлеченного текста: {text.Length} символов.");
+            return text;
         }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Ошибка OCR: {ex.Message}");
+            throw;
+        }
+    }
 
-        private static string SavePageAsPdf(PdfSharp.Pdf.PdfDocument inputDoc, int pageIndex, string name, string outputFolder)
-        {
-            PdfSharp.Pdf.PdfDocument outputDoc = new PdfSharp.Pdf.PdfDocument();
-            outputDoc.AddPage(inputDoc.Pages[pageIndex]);
-            string sanitizedName = SanitizeFileName(name);
-            string fileName = $"{sanitizedName}.pdf";
-            string filePath = Path.Combine(outputFolder, fileName);
-            outputDoc.Save(filePath);
-            return filePath;
-        }
+    static string ExtractName(string ocrText)
+    {
+        Console.WriteLine("🔎 Извлечение имени из распознанного текста...");
+        var regex = new Regex(@"Настоящий сертификат удостоверяет, что\s+([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)");
+        var match = regex.Match(ocrText.Replace("\n", " "));
+        var result = match.Success ? match.Groups[1].Value : "Неизвестный";
 
-        private static string SanitizeFileName(string fileName)
-        {
-            foreach (char c in Path.GetInvalidFileNameChars())
-            {
-                fileName = fileName.Replace(c, '_');
-            }
-            return fileName;
-        }
+        Console.WriteLine($"📝 Извлечено имя: {result}");
+        return result;
+    }
+
+    static string SavePageAsPdf(PdfDocument inputDoc, int index, string name)
+    {
+        Console.WriteLine($"💾 Сохранение страницы {index + 1} как отдельный PDF...");
+        var outputDoc = new PdfDocument();
+        outputDoc.AddPage(inputDoc.Pages[index]);
+        var sanitized = string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+        var filePath = Path.Combine(Path.GetTempPath(), $"{sanitized}_{index + 1}.pdf");
+        outputDoc.Save(filePath);
+
+        Console.WriteLine($"✅ Страница сохранена: {filePath}");
+        return filePath;
     }
 }
